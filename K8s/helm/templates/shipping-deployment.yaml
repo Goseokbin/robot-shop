@@ -41,6 +41,10 @@ spec:
           failureThreshold: 30
           successThreshold: 1
       restartPolicy: Always
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.shipping.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
@@ -50,8 +54,6 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.shipping.tolerations }}
-      imagePullSecrets:
-        name: registry
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

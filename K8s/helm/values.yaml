@@ -4,6 +4,9 @@ image:
   repo: robotshop
   version: latest
   pullPolicy: IfNotPresent
+  # Private registry용 - 예: - name: registry
+  pullSecrets:
+  - name: registry
 
 # EUM configuration
 # Provide your key and set the endpoint

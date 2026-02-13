@@ -20,7 +20,8 @@ spec:
       containers:
       - name: shipping
         image: {{ .Values.image.repo }}/rs-shipping:{{ .Values.image.version }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        image: docker.io/seokbin9023/my-repository:shipping
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         # it's Java it needs lots of memory
@@ -49,6 +50,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.shipping.tolerations }}
+      imagePullSecret:
+        name: registry
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

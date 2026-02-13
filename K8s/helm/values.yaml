@@ -20,7 +20,7 @@ psp:
 nodeport: false
 
 # "special" Openshift. Set to true when deploying to any openshift flavour
-openshift: false
+openshift: true
 
 ocCreateRoute: false
 
@@ -55,7 +55,7 @@ ratings: {}
 
 redis:
   # Storage class to use with redis statefulset.
-  storageClassName: standard
+  storageClassName: ocs-external-storagecluster-ceph-rbd
 
 shipping: {}
 

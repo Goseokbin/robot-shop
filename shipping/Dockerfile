@@ -1,7 +1,7 @@
 #
 # Build
 #
-FROM debian:10 AS build
+FROM debian:12 AS build
 
 RUN apt-get update && apt-get -y install maven
 
@@ -15,7 +15,7 @@ RUN mvn package
 #
 # Run
 #
-FROM openjdk:8-jdk
+FROM eclipse-temurin:8-jdk
 
 EXPOSE 8080
 

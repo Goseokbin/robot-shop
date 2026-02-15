@@ -48,10 +48,10 @@ public class ScenarioController {
      */
     private HikariDataSource unwrapHikariDataSource() {
         DataSource ds = dataSource;
-        // RetryableDataSource → delegate 필드에서 HikariDataSource 추출
-        if (ds instanceof AbstractDataSource && !(ds instanceof HikariDataSource)) {
+        // RetryableDataSource (CGLIB 프록시 포함) → delegate 필드에서 HikariDataSource 추출
+        if (!(ds instanceof HikariDataSource)) {
             try {
-                Field delegateField = ds.getClass().getDeclaredField("delegate");
+                Field delegateField = findField(ds.getClass(), "delegate");
                 delegateField.setAccessible(true);
                 ds = (DataSource) delegateField.get(ds);
             } catch (Exception e) {
@@ -62,6 +62,21 @@ public class ScenarioController {
             return (HikariDataSource) ds;
         }
         throw new RuntimeException("DataSource is not HikariDataSource: " + ds.getClass().getName());
+    }
+
+    /**
+     * CGLIB 프록시 클래스를 포함하여 상위 클래스 체인에서 필드를 찾습니다.
+     */
+    private Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        Class<?> current = clazz;
+        while (current != null && current != Object.class) {
+            try {
+                return current.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException e) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(fieldName + " not found in class hierarchy of " + clazz.getName());
     }
 
     /**

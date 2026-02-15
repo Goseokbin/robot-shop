@@ -1,42 +1,91 @@
-# 모니터링 시나리오 (Monitoring Scenarios)
+# Connection Pool Exhaustion → Alert → Pool Resize 시나리오
 
-OpenShift/Instana 모니터링 테스트를 위한 시나리오 엔드포인트입니다.
+OpenShift에 배포된 Robot Shop의 Shipping 서비스에서 DB connection pool 고갈 → Instana 알림 → pool 동적 확장으로 해결하는 데모 시나리오입니다.
 
-## MySQL 연결 고갈 (Connection Exhaustion)
+## 시나리오 흐름
 
-MySQL의 max_connections를 초과하여 "Too many connections" 에러를 유발하는 시나리오입니다.
-Shipping 및 Ratings 서비스가 동일한 MySQL 인스턴스를 사용하므로, 연결이 고갈되면 두 서비스 모두 영향받습니다.
-
-### 호출 방법
-
-**Web Gateway 경유 (권장):**
-```bash
-# 기본값: 200개 연결, 120초간 유지
-curl "http://<web-host>:8080/api/shipping/scenario/mysql-exhaustion"
-
-# 파라미터 지정
-curl "http://<web-host>:8080/api/shipping/scenario/mysql-exhaustion?connections=200&hold_seconds=60"
+```
+정상 (pool=5) → Pool 고갈 → /count 에러 (Instana 알림) → Pool 확장 (size=20) → /count 정상 → 정리
 ```
 
-**Shipping 서비스 직접 호출:**
+## 엔드포인트
+
+| 엔드포인트 | 설명 |
+|-----------|------|
+| `GET /scenario/pool-status` | 현재 pool 상태 조회 (total/active/idle/waiting) |
+| `GET /scenario/pool-exhaustion` | pool의 모든 connection을 SLEEP 쿼리로 점유 (기본 300초) |
+| `GET /scenario/pool-resize?size=20` | HikariCP pool 크기를 동적으로 증가 |
+| `GET /scenario/pool-release` | 점유 중인 connection 해제 |
+
+## 실행 순서
+
 ```bash
-curl "http://<shipping-host>:8080/scenario/mysql-exhaustion?connections=200&hold_seconds=60"
+# Web Gateway 경유 (권장)
+BASE_URL="http://<web-host>:8080/api/shipping"
+
+# 직접 호출
+# BASE_URL="http://<shipping-host>:8080"
+
+# 1. 정상 상태 확인
+curl "$BASE_URL/count"                     # → 정상 응답
+curl "$BASE_URL/scenario/pool-status"      # → maximumPoolSize=5, activeConnections=0
+
+# 2. Pool 고갈 실행
+curl "$BASE_URL/scenario/pool-exhaustion"
+# → 5개 connection 모두 SLEEP 쿼리로 점유
+curl "$BASE_URL/scenario/pool-status"      # → activeConnections=5, idleConnections=0
+
+# 3. 에러 확인 (이 시점에서 Instana 알림 트리거)
+curl "$BASE_URL/count"
+# → Connection pool timeout 에러 (5000ms 후 실패)
+# → Instana에서 에러 이벤트 감지
+
+# 4. Pool 동적 확장으로 해결
+curl "$BASE_URL/scenario/pool-resize?size=20"
+# → pool 크기 5 → 20으로 확장
+curl "$BASE_URL/scenario/pool-status"      # → maximumPoolSize=20, totalConnections 증가
+curl "$BASE_URL/count"                     # → 정상 응답 (문제 해결!)
+
+# 5. 정리
+curl "$BASE_URL/scenario/pool-release"
+# → 점유 스레드 interrupt, connection 해제
 ```
 
-### 파라미터
+## 설정
 
-| 파라미터 | 기본값 | 설명 |
-|---------|--------|------|
-| `connections` | 200 | 생성할 MySQL 연결 수 (MySQL 기본 max_connections=151을 초과하도록 설정) |
-| `hold_seconds` | 120 | 각 연결을 유지할 시간(초). SLEEP 쿼리로 연결 점유 |
+### application.properties
 
-### 예상 결과
+```properties
+# 작은 pool로 시작 (고갈 데모용)
+spring.datasource.hikari.maximum-pool-size=5
+# Pool 소진 시 빠르게 에러 발생 (5초)
+spring.datasource.hikari.connection-timeout=5000
+```
 
-- 초기: 지정된 수만큼 MySQL 연결 생성 시도
-- MySQL max_connections(기본 151) 초과 시: "Too many connections" 에러 발생
-- Shipping, Ratings 서비스의 DB 요청 실패
-- Instana에서 DB 연결 에러, 고 latency 등 모니터링 가능
+## Instana 알림 설정 가이드
 
-### 복구
+### Event 기반 알림
 
-연결은 `hold_seconds` 경과 후 자동으로 해제됩니다. 추가 호출 없이 대기하면 됩니다.
+1. **Instana UI** → **Settings** → **Alerts**
+2. **New Alert** 생성
+3. 조건 설정:
+   - **Event Type**: Error / Exception
+   - **Service**: shipping
+   - **Filter**: `error.message CONTAINS "Connection is not available"`
+4. **Alert Channel** 설정 (Slack, Email 등)
+
+### Custom Event 설정 (권장)
+
+1. **Settings** → **Events** → **New Event**
+2. 설정:
+   - **Name**: "Connection Pool Exhaustion"
+   - **Entity Type**: JVM
+   - **Condition**: Built-in metric `hikaricp.connections.active` equals `hikaricp.connections.max`
+   - 또는 Application Perspective에서 에러율 기반 조건 설정
+3. 해당 Event를 Alert에 연결
+
+## 복구
+
+- `pool-release` 호출 시 점유 connection이 해제됩니다
+- 서비스를 재시작하면 pool size가 기본값(5)으로 복원됩니다
+- SLEEP 쿼리는 `sleepSeconds` 파라미터 시간(기본 300초) 후 자동 종료됩니다

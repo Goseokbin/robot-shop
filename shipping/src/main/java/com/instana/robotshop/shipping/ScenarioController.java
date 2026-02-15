@@ -4,8 +4,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.HikariPoolMXBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.aop.framework.Advised;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -48,35 +48,25 @@ public class ScenarioController {
      */
     private HikariDataSource unwrapHikariDataSource() {
         DataSource ds = dataSource;
-        // RetryableDataSource (CGLIB 프록시 포함) → delegate 필드에서 HikariDataSource 추출
-        if (!(ds instanceof HikariDataSource)) {
-            try {
-                Field delegateField = findField(ds.getClass(), "delegate");
+        try {
+            // CGLIB 프록시인 경우 Spring AOP의 Advised로 실제 타겟 객체를 가져옴
+            if (ds instanceof Advised) {
+                ds = (DataSource) ((Advised) ds).getTargetSource().getTarget();
+            }
+            // RetryableDataSource → delegate 필드에서 HikariDataSource 추출
+            if (ds != null && !(ds instanceof HikariDataSource)) {
+                Field delegateField = ds.getClass().getDeclaredField("delegate");
                 delegateField.setAccessible(true);
                 ds = (DataSource) delegateField.get(ds);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to unwrap HikariDataSource from " + ds.getClass().getName(), e);
             }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to unwrap HikariDataSource from " + dataSource.getClass().getName(), e);
         }
         if (ds instanceof HikariDataSource) {
             return (HikariDataSource) ds;
         }
-        throw new RuntimeException("DataSource is not HikariDataSource: " + ds.getClass().getName());
-    }
-
-    /**
-     * CGLIB 프록시 클래스를 포함하여 상위 클래스 체인에서 필드를 찾습니다.
-     */
-    private Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            try {
-                return current.getDeclaredField(fieldName);
-            } catch (NoSuchFieldException e) {
-                current = current.getSuperclass();
-            }
-        }
-        throw new NoSuchFieldException(fieldName + " not found in class hierarchy of " + clazz.getName());
+        throw new RuntimeException("DataSource is not HikariDataSource: " +
+                (ds != null ? ds.getClass().getName() : "null"));
     }
 
     /**

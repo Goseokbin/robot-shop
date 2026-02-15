@@ -6,6 +6,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.Advised;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -187,6 +189,41 @@ public class ScenarioController {
                 "Pool size remains at " + currentSize + ". " +
                 "Restart the service to reset pool size to default (5).");
         return result;
+    }
+
+    /**
+     * Pool에 idle connection이 없으면 500 에러를 반환합니다.
+     * Pool 고갈 상태를 확인하여 Instana에서 에러로 감지되도록 합니다.
+     */
+    @GetMapping("/pool-check")
+    public ResponseEntity<Map<String, Object>> poolCheck() {
+        HikariDataSource hikari = unwrapHikariDataSource();
+        HikariPoolMXBean poolBean = hikari.getHikariPoolMXBean();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("scenario", "pool-check");
+        result.put("maximumPoolSize", hikari.getMaximumPoolSize());
+
+        if (poolBean != null) {
+            int idle = poolBean.getIdleConnections();
+            int active = poolBean.getActiveConnections();
+            int waiting = poolBean.getThreadsAwaitingConnection();
+            result.put("activeConnections", active);
+            result.put("idleConnections", idle);
+            result.put("threadsAwaitingConnection", waiting);
+
+            if (idle == 0) {
+                result.put("error", "Connection pool exhausted");
+                result.put("message", "No idle connections available. All " + active +
+                        " connections are in use. Service is unable to process DB requests.");
+                logger.error("Connection pool exhausted: active={}, idle={}, waiting={}", active, idle, waiting);
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+            }
+        }
+
+        result.put("status", "OK");
+        result.put("message", "Connection pool is healthy.");
+        return ResponseEntity.ok(result);
     }
 
     /**

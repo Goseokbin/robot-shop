@@ -173,6 +173,70 @@ curl "$BASE_URL/scenario/memory-check"       # → 200 OK
 
 ---
 
+# 시나리오 3: Payment 결제 점검 모드 (flagd Feature Flag)
+
+Payment Pod 장애 시 flagd Feature Flag를 통해 **결제시스템 점검 모드**로 전환하여 신규 결제를 차단하는 시나리오입니다.
+
+## 시나리오 흐름
+
+```
+정상 → flagd payment-maintenance=true → 5초 내 점검 모드 전환
+→ POST /pay/<id> → 503 "Payment system is under maintenance"
+→ flagd payment-maintenance=false → 결제 정상 재개
+```
+
+## 엔드포인트
+
+| 엔드포인트 | 설명 |
+|-----------|------|
+| `GET /maintenance-status` | 현재 점검 모드 상태 확인 (`{"maintenance": true/false}`) |
+| `POST /pay/<id>` | 점검 모드 시 503 반환, 정상 시 결제 처리 |
+
+## 실행 순서
+
+### K8s / OpenShift
+
+```bash
+BASE_URL="http://<web-host>:8080/api/payment"
+
+# 1. 정상 상태 확인
+curl "$BASE_URL/maintenance-status"    # → {"maintenance": false}
+
+# 2. Flag ON — 점검 모드 전환
+oc edit configmap flagd-config
+# "payment-maintenance" 항목의 "defaultVariant": "false" → "true"
+
+# 3. 5초 내 점검 모드 전환 확인
+curl "$BASE_URL/maintenance-status"    # → {"maintenance": true}
+
+# 4. 결제 차단 확인
+curl -X POST "$BASE_URL/pay/test" -H 'Content-Type: application/json' -d '{}'
+# → 503 {"error": "Payment system is under maintenance"}
+
+# 5. Flag OFF — 정상 복구
+oc edit configmap flagd-config
+# "payment-maintenance" 항목의 "defaultVariant": "true" → "false"
+
+# 6. 결제 정상 재개 확인
+curl "$BASE_URL/maintenance-status"    # → {"maintenance": false}
+```
+
+### Docker Compose
+
+```bash
+# 1. flagd-config.json에서 payment-maintenance defaultVariant → "true"
+vi flagd-config.json
+
+# 2. 5초 후 확인
+curl http://localhost:8080/api/payment/maintenance-status    # → {"maintenance": true}
+curl -X POST http://localhost:8080/api/payment/pay/test -H 'Content-Type: application/json' -d '{}'
+# → 503
+
+# 3. defaultVariant → "false"로 되돌리기 → 결제 정상
+```
+
+---
+
 # flagd Feature Flag 연동 (자동 시나리오 유발)
 
 위 시나리오들을 curl 수동 호출 대신 **flagd Feature Flag**로 자동 유발할 수 있습니다.
@@ -201,6 +265,7 @@ shipping app
 |----------|------|
 | `scenario-memory-leak` | ON → 메모리 누수 자동 유발 (25MB × 20 = 500MB) |
 | `scenario-pool-exhaustion` | ON → DB connection pool 고갈 자동 유발 |
+| `payment-maintenance` | ON → Payment 결제 점검 모드 (POST /pay 503 반환) |
 
 ## K8s / OpenShift 환경 사용법
 

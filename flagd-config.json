@@ -16,6 +16,14 @@
         "false": false
       },
       "defaultVariant": "false"
+    },
+    "payment-maintenance": {
+      "state": "ENABLED",
+      "variants": {
+        "true": true,
+        "false": false
+      },
+      "defaultVariant": "false"
     }
   }
 }

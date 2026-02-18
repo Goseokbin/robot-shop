@@ -1,4 +1,5 @@
 import random
+import threading
 
 import instana
 import os
@@ -24,6 +25,34 @@ app.logger.setLevel(logging.INFO)
 CART = os.getenv('CART_HOST', 'cart')
 USER = os.getenv('USER_HOST', 'user')
 PAYMENT_GATEWAY = os.getenv('PAYMENT_GATEWAY', 'https://paypal.com/')
+
+# flagd Feature Flag — payment maintenance mode
+FLAGD_OFREP_URL = os.getenv('FLAGD_OFREP_URL', '')
+maintenance_mode = False
+
+def _poll_flagd():
+    global maintenance_mode
+    if not FLAGD_OFREP_URL:
+        return
+    url = '{}/ofrep/v1/evaluate/flags/payment-maintenance'.format(FLAGD_OFREP_URL)
+    while True:
+        try:
+            resp = requests.post(url, json={'context': {}}, timeout=3)
+            if resp.status_code == 200:
+                value = resp.json().get('value', False)
+                if value != maintenance_mode:
+                    app.logger.info('maintenance_mode changed: {} -> {}'.format(maintenance_mode, value))
+                maintenance_mode = value
+            else:
+                app.logger.debug('flagd returned {}'.format(resp.status_code))
+        except Exception:
+            pass
+        time.sleep(5)
+
+if FLAGD_OFREP_URL:
+    _flag_thread = threading.Thread(target=_poll_flagd, daemon=True)
+    _flag_thread.start()
+    app.logger.info('Started flagd polling thread: {}'.format(FLAGD_OFREP_URL))
 
 # Prometheus
 PromMetrics = {}
@@ -51,8 +80,14 @@ def metrics():
     return Response(res, mimetype='text/plain')
 
 
+@app.route('/maintenance-status', methods=['GET'])
+def maintenance_status():
+    return jsonify({'maintenance': maintenance_mode})
+
 @app.route('/pay/<id>', methods=['POST'])
 def pay(id):
+    if maintenance_mode:
+        return jsonify({'error': 'Payment system is under maintenance'}), 503
     app.logger.info('payment for {}'.format(id))
     cart = request.get_json()
     app.logger.info(cart)

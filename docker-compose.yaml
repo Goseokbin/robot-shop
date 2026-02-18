@@ -131,6 +131,7 @@ services:
     image: ${REPO}/rs-payment:${TAG}
     depends_on:
       - rabbitmq
+      - flagd
     networks:
       - robot-shop
     healthcheck:
@@ -138,8 +139,8 @@ services:
       interval: 10s
       timeout: 10s
       retries: 3
-    # Uncomment to change payment gateway
-    #environment:
+    environment:
+      FLAGD_OFREP_URL: http://flagd:8016
       #PAYMENT_GATEWAY: "https://www.worldpay.com"
     logging:
       <<: *logging

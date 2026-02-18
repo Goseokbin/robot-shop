@@ -30,6 +30,8 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: status.hostIP
+          - name: FLAGD_OFREP_URL
+            value: "http://localhost:8016"
           {{- if .Values.payment.gateway }}
           - name: PAYMENT_GATEWAY
             value: {{ .Values.payment.gateway }}
@@ -43,6 +45,25 @@ spec:
           requests:
             cpu: 100m
             memory: 50Mi
+      - name: flagd
+        image: ghcr.io/open-feature/flagd:latest
+        args: ["start", "--uri", "file:/etc/flagd/flagd-config.json"]
+        ports:
+        - containerPort: 8016
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 50m
+            memory: 32Mi
+        volumeMounts:
+        - name: flagd-config
+          mountPath: /etc/flagd
+      volumes:
+      - name: flagd-config
+        configMap:
+          name: flagd-config
       restartPolicy: Always
       {{- with .Values.payment.affinity }}
       affinity:

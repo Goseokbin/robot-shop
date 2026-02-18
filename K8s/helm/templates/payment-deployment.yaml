@@ -22,8 +22,13 @@ spec:
       {{ end }}
       containers:
       - name: payment
-        image: {{ .Values.image.repo }}/rs-payment:{{ .Values.image.version }}
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        #image: {{ .Values.image.repo }}/rs-payment:{{ .Values.image.version }}
+        image: docker.io/seokbin9023/my-repository:payment
+        imagePullPolicy: Always
+        # pyrasite-dump용: gdb가 프로세스에 attach하려면 SYS_PTRACE 필요
+        securityContext:
+          capabilities:
+            add: ["SYS_PTRACE"]
         # agent networking access
         env:
           - name: INSTANA_AGENT_HOST
@@ -32,6 +37,8 @@ spec:
                 fieldPath: status.hostIP
           - name: FLAGD_OFREP_URL
             value: "http://localhost:8016"
+          - name: MEMORY_LIMIT_MB
+            value: "256"
           {{- if .Values.payment.gateway }}
           - name: PAYMENT_GATEWAY
             value: {{ .Values.payment.gateway }}
@@ -41,10 +48,10 @@ spec:
         resources:
           limits:
             cpu: 200m
-            memory: 100Mi
+            memory: 256Mi
           requests:
             cpu: 100m
-            memory: 50Mi
+            memory: 128Mi
       - name: flagd
         image: ghcr.io/open-feature/flagd:latest
         args: ["start", "--uri", "file:/etc/flagd/flagd-config.json"]
@@ -65,6 +72,10 @@ spec:
         configMap:
           name: flagd-config
       restartPolicy: Always
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.payment.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}

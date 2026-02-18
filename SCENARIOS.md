@@ -100,7 +100,7 @@ spring.datasource.hikari.connection-timeout=5000
 
 # 시나리오 2: Memory Leak → OOMKilled → oc set resources 복구
 
-Shipping 서비스에서 메모리 누수 → Pod OOMKilled → `oc` 커맨드로 원인 분석 및 리소스 상향으로 복구하는 시나리오입니다.
+Payment 서비스(Python/Flask)에서 메모리 누수 → Pod OOMKilled → `oc` 커맨드로 원인 분석 및 리소스 상향으로 복구하는 시나리오입니다.
 
 ## 시나리오 흐름
 
@@ -113,54 +113,54 @@ Shipping 서비스에서 메모리 누수 → Pod OOMKilled → `oc` 커맨드�
 
 | 엔드포인트 | 설명 |
 |-----------|------|
-| `GET /scenario/memory-check` | 힙 사용률 확인 — 80% 초과 시 500 에러 (Instana 알림용) |
-| `GET /scenario/memory-leak?chunkMB=25&count=20` | chunkMB×count MB 만큼 메모리 할당 (static List, GC 불가) |
+| `GET /scenario/memory-check` | RSS 메모리 사용률 확인 — K8s limit의 80% 초과 시 500 에러 (Instana 알림용) |
+| `GET /scenario/memory-leak?chunkMB=25&count=4` | chunkMB×count MB 만큼 bytearray 할당 (전역 리스트, GC 불가) |
 
-## JVM / K8s 설정
+## Python / K8s 설정
 
-- **JVM**: `-Xmx768m` (Dockerfile)
-- **K8s memory limit**: `1000Mi`
-- memory-leak으로 500MB 할당 시 힙 사용률 80% 초과 → memory-check 500 에러
-- 추가 할당 또는 시간 경과 시 OOMKilled 발생
+- **K8s memory limit**: `256Mi`
+- **MEMORY_LIMIT_MB** 환경변수: `256` (memory-check 임계값 계산용)
+- memory-leak 기본값: 25MB × 4 = 100MB 할당 → RSS가 limit의 80% 초과 → memory-check 500 에러
+- 추가 할당 시 OOMKilled 발생
 
 ## 실행 순서
 
 ```bash
-BASE_URL="http://<web-host>:8080/api/shipping"
+BASE_URL="http://<web-host>:8080/api/payment"
 
 # 1. 정상 상태 확인
 curl "$BASE_URL/scenario/memory-check"
-# → 200 OK, "Heap memory is healthy"
+# → 200 OK, {"status": "HEALTHY", "rssMB": ..., "usagePercent": ...}
 
 # 2. 메모리 누수 유발
-curl "$BASE_URL/scenario/memory-leak?chunkMB=25&count=20"
-# → 500MB 할당, 힙 사용률 급증
+curl "$BASE_URL/scenario/memory-leak?chunkMB=25&count=4"
+# → 100MB 할당, RSS 급증
 
 # 3. 장애 확인 (Instana 알림 트리거)
 curl "$BASE_URL/scenario/memory-check"
-# → 500 "Heap memory critical"
+# → 500 {"status": "CRITICAL", "usagePercent": ...}
 
 # 4. Pod 상태 확인
-oc get pods -l service=shipping
+oc get pods -l service=payment
 # → OOMKilled 또는 CrashLoopBackOff 상태
 
 # 5. 원인 분석
-oc describe pod <shipping-pod>
+oc describe pod <payment-pod>
 # → Last State: Terminated, Reason: OOMKilled
 
-oc logs <shipping-pod> --previous
-# → "HEAP CRITICAL: usage=..." 로그 확인
+oc logs <payment-pod> --previous
+# → "MEMORY CRITICAL: RSS=..." 로그 확인
 
 # 6. Resource limit 상향으로 복구
-oc set resources deployment/shipping --limits=memory=2Gi --requests=memory=1Gi
+oc set resources deployment/payment --limits=memory=512Mi --requests=memory=256Mi
 # → Deployment 변경으로 새 Pod 자동 rollout
 
 # 7. Rollout 확인
-oc rollout status deployment/shipping
+oc rollout status deployment/payment
 # → 새 Pod 정상 기동
 
 # 8. 복구 확인
-oc get pods -l service=shipping              # → Running, RESTARTS 0 (새 Pod)
+oc get pods -l service=payment              # → Running, RESTARTS 0 (새 Pod)
 curl "$BASE_URL/scenario/memory-check"       # → 200 OK
 ```
 
@@ -168,7 +168,7 @@ curl "$BASE_URL/scenario/memory-check"       # → 200 OK
 
 1. `oc set resources`로 memory limit을 상향하면 Deployment spec이 변경됨
 2. K8s가 자동으로 새 Pod을 rollout (기존 Pod 종료 → 새 Pod 생성)
-3. 새 Pod은 깨끗한 JVM으로 시작 → 메모리 누수 없음 + 더 큰 limit 적용
+3. 새 Pod은 깨끗한 프로세스로 시작 → 메모리 누수 없음 + 더 큰 limit 적용
 4. 근본 원인(코드의 메모리 누수)은 별도 코드 수정이 필요하지만, 운영 중 즉각 대응으로 서비스 복구
 
 ---
@@ -253,18 +253,23 @@ flagd (port 8016, OFREP REST API)
 
 shipping app
   └─ ScenarioFlagWatcher (@Scheduled, 5초 간격)
-       ├─ POST /ofrep/v1/evaluate/flags/scenario-memory-leak
-       │    → true: memory leak 유발 (1회)
        └─ POST /ofrep/v1/evaluate/flags/scenario-pool-exhaustion
             → true: pool exhaustion 유발 (1회)
+
+payment app
+  └─ _poll_flagd() (Thread, 5초 간격)
+       ├─ POST /ofrep/v1/evaluate/flags/payment-maintenance
+       │    → true: 결제 점검 모드
+       └─ POST /ofrep/v1/evaluate/flags/scenario-memory-leak
+            → true: memory leak 유발 (1회, 25MB × 4 = 100MB)
 ```
 
 ## Feature Flag 목록
 
 | Flag Key | 설명 |
 |----------|------|
-| `scenario-memory-leak` | ON → 메모리 누수 자동 유발 (25MB × 20 = 500MB) |
-| `scenario-pool-exhaustion` | ON → DB connection pool 고갈 자동 유발 |
+| `scenario-memory-leak` | ON → Payment 메모리 누수 자동 유발 (25MB × 4 = 100MB) |
+| `scenario-pool-exhaustion` | ON → Shipping DB connection pool 고갈 자동 유발 |
 | `payment-maintenance` | ON → Payment 결제 점검 모드 (POST /pay 503 반환) |
 
 ## K8s / OpenShift 환경 사용법
@@ -281,16 +286,16 @@ oc edit configmap flagd-config
 # 또는 파일로 수정 후 적용
 oc apply -f flagd-configmap.yaml
 
-# 2. 5초 내 shipping이 flag 감지 → 자동 메모리 누수 유발
+# 2. 5초 내 payment가 flag 감지 → 자동 메모리 누수 유발
 # 로그 확인:
-oc logs -f <shipping-pod> -c shipping | grep FlagWatcher
+oc logs -f <payment-pod> -c payment | grep memory
 
 # 3. 장애 확인
-curl $BASE_URL/scenario/memory-check    # → 500 "Heap memory critical"
+curl $BASE_URL/scenario/memory-check    # → 500 {"status": "CRITICAL"}
 
 # 4. Instana에서 알림 확인 후 원인 분석
-oc describe pod <shipping-pod>
-oc logs <shipping-pod> --previous
+oc describe pod <payment-pod>
+oc logs <payment-pod> --previous
 ```
 
 ### 시나리오 중단 및 복구
@@ -301,10 +306,10 @@ oc edit configmap flagd-config
 # "defaultVariant": "true" → "false"
 
 # 2. 리소스 상향 (메모리 누수의 경우)
-oc set resources deployment/shipping --limits=memory=2Gi
+oc set resources deployment/payment --limits=memory=512Mi
 
 # 3. 새 Pod 기동 → flag OFF → 정상 동작
-oc rollout status deployment/shipping
+oc rollout status deployment/payment
 curl $BASE_URL/scenario/memory-check    # → 200 OK
 ```
 
@@ -317,7 +322,7 @@ vi flagd-config.json
 # "defaultVariant": "false" → "true"
 
 # 5초 후 자동 유발 확인
-curl http://localhost:8080/api/shipping/scenario/memory-check    # → 500
+curl http://localhost:8080/api/payment/scenario/memory-check    # → 500
 
 # 복구: defaultVariant를 "false"로 되돌리기
 vi flagd-config.json

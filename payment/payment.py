@@ -10,6 +10,7 @@ import uuid
 import json
 import requests
 import traceback
+import psutil
 from flask import Flask
 from flask import Response
 from flask import request
@@ -26,25 +27,58 @@ CART = os.getenv('CART_HOST', 'cart')
 USER = os.getenv('USER_HOST', 'user')
 PAYMENT_GATEWAY = os.getenv('PAYMENT_GATEWAY', 'https://paypal.com/')
 
-# flagd Feature Flag — payment maintenance mode
+# flagd Feature Flag — payment maintenance mode & memory leak scenario
 FLAGD_OFREP_URL = os.getenv('FLAGD_OFREP_URL', '')
 maintenance_mode = False
 
+# Memory Leak scenario
+_leaked_bytes = []
+_memory_leak_triggered = False
+MEMORY_LIMIT_MB = int(os.getenv('MEMORY_LIMIT_MB', '256'))
+
+def _trigger_memory_leak(chunk_mb=25, count=4):
+    """Allocate chunk_mb × count MB into _leaked_bytes (GC-proof)."""
+    total = 0
+    for _ in range(count):
+        chunk = bytearray(chunk_mb * 1024 * 1024)
+        _leaked_bytes.append(chunk)
+        total += chunk_mb
+    app.logger.warning('MEMORY LEAK: allocated {}MB ({} chunks x {}MB), total leaked chunks={}'.format(
+        total, count, chunk_mb, len(_leaked_bytes)))
+
 def _poll_flagd():
-    global maintenance_mode
+    global maintenance_mode, _memory_leak_triggered
     if not FLAGD_OFREP_URL:
         return
-    url = '{}/ofrep/v1/evaluate/flags/payment-maintenance'.format(FLAGD_OFREP_URL)
+    maint_url = '{}/ofrep/v1/evaluate/flags/payment-maintenance'.format(FLAGD_OFREP_URL)
+    memleak_url = '{}/ofrep/v1/evaluate/flags/scenario-memory-leak'.format(FLAGD_OFREP_URL)
     while True:
+        # poll payment-maintenance flag
         try:
-            resp = requests.post(url, json={'context': {}}, timeout=3)
+            resp = requests.post(maint_url, json={'context': {}}, timeout=3)
             if resp.status_code == 200:
                 value = resp.json().get('value', False)
                 if value != maintenance_mode:
                     app.logger.info('maintenance_mode changed: {} -> {}'.format(maintenance_mode, value))
                 maintenance_mode = value
             else:
-                app.logger.debug('flagd returned {}'.format(resp.status_code))
+                app.logger.debug('flagd payment-maintenance returned {}'.format(resp.status_code))
+        except Exception:
+            pass
+        # poll scenario-memory-leak flag
+        try:
+            resp = requests.post(memleak_url, json={'context': {}}, timeout=3)
+            if resp.status_code == 200:
+                value = resp.json().get('value', False)
+                if value and not _memory_leak_triggered:
+                    app.logger.info('scenario-memory-leak flag ON — triggering memory leak')
+                    _memory_leak_triggered = True
+                    _trigger_memory_leak()
+                elif not value and _memory_leak_triggered:
+                    app.logger.info('scenario-memory-leak flag OFF — resetting triggered state')
+                    _memory_leak_triggered = False
+            else:
+                app.logger.debug('flagd scenario-memory-leak returned {}'.format(resp.status_code))
         except Exception:
             pass
         time.sleep(5)
@@ -79,6 +113,37 @@ def metrics():
 
     return Response(res, mimetype='text/plain')
 
+
+@app.route('/scenario/memory-leak', methods=['GET'])
+def memory_leak():
+    chunk_mb = int(request.args.get('chunkMB', 25))
+    count = int(request.args.get('count', 4))
+    _trigger_memory_leak(chunk_mb, count)
+    rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+    return jsonify({
+        'allocated': '{}MB ({} x {}MB)'.format(chunk_mb * count, count, chunk_mb),
+        'totalLeakedChunks': len(_leaked_bytes),
+        'rssMB': round(rss_mb, 1),
+        'limitMB': MEMORY_LIMIT_MB,
+    })
+
+@app.route('/scenario/memory-check', methods=['GET'])
+def memory_check():
+    rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+    usage_pct = (rss_mb / MEMORY_LIMIT_MB) * 100
+    result = {
+        'rssMB': round(rss_mb, 1),
+        'limitMB': MEMORY_LIMIT_MB,
+        'usagePercent': round(usage_pct, 1),
+        'leakedChunks': len(_leaked_bytes),
+    }
+    if usage_pct > 80:
+        app.logger.error('MEMORY CRITICAL: RSS={:.0f}MB, limit={}MB, usage={:.1f}%'.format(
+            rss_mb, MEMORY_LIMIT_MB, usage_pct))
+        result['status'] = 'CRITICAL'
+        return jsonify(result), 500
+    result['status'] = 'HEALTHY'
+    return jsonify(result)
 
 @app.route('/maintenance-status', methods=['GET'])
 def maintenance_status():

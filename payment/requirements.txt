@@ -1,7 +1,10 @@
 uwsgi
 Flask
+pyrasite
+objgraph
 requests
 pika
 prometheus_client
 opentracing
 instana
+psutil

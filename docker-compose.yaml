@@ -79,12 +79,26 @@ services:
       - robot-shop
     logging:
       <<: *logging
+  flagd:
+    image: ghcr.io/open-feature/flagd:latest
+    ports:
+      - "8016:8016"
+    volumes:
+      - ./flagd-config.json:/flagd-config.json
+    command: ["start", "--uri", "file:/flagd-config.json"]
+    networks:
+      - robot-shop
+    logging:
+      <<: *logging
   shipping:
     build:
       context: shipping
     image: ${REPO}/rs-shipping:${TAG}
     depends_on:
       - mysql
+      - flagd
+    environment:
+      FLAGD_OFREP_URL: http://flagd:8016
     networks:
       - robot-shop
     healthcheck:

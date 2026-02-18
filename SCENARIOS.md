@@ -1,4 +1,10 @@
-# Connection Pool Exhaustion → Alert → Pool Resize 시나리오
+# SRE 데모 시나리오
+
+OpenShift에 배포된 Robot Shop의 Shipping 서비스를 활용한 SRE 데모 시나리오 모음입니다.
+
+---
+
+# 시나리오 1: Connection Pool Exhaustion → Alert → Pool Resize
 
 OpenShift에 배포된 Robot Shop의 Shipping 서비스에서 DB connection pool 고갈 → Instana 알림 → pool 동적 확장으로 해결하는 데모 시나리오입니다.
 
@@ -89,3 +95,166 @@ spring.datasource.hikari.connection-timeout=5000
 - `pool-release` 호출 시 점유 connection이 해제됩니다
 - 서비스를 재시작하면 pool size가 기본값(5)으로 복원됩니다
 - SLEEP 쿼리는 `sleepSeconds` 파라미터 시간(기본 300초) 후 자동 종료됩니다
+
+---
+
+# 시나리오 2: Memory Leak → OOMKilled → oc set resources 복구
+
+Shipping 서비스에서 메모리 누수 → Pod OOMKilled → `oc` 커맨드로 원인 분석 및 리소스 상향으로 복구하는 시나리오입니다.
+
+## 시나리오 흐름
+
+```
+정상 → memory-leak 유발 → memory-check 500 (Instana 알림) → OOMKilled/CrashLoopBackOff
+→ oc describe (원인 확인) → oc logs --previous (로그 확인) → oc set resources (리소스 상향) → 복구
+```
+
+## 엔드포인트
+
+| 엔드포인트 | 설명 |
+|-----------|------|
+| `GET /scenario/memory-check` | 힙 사용률 확인 — 80% 초과 시 500 에러 (Instana 알림용) |
+| `GET /scenario/memory-leak?chunkMB=25&count=20` | chunkMB×count MB 만큼 메모리 할당 (static List, GC 불가) |
+
+## JVM / K8s 설정
+
+- **JVM**: `-Xmx768m` (Dockerfile)
+- **K8s memory limit**: `1000Mi`
+- memory-leak으로 500MB 할당 시 힙 사용률 80% 초과 → memory-check 500 에러
+- 추가 할당 또는 시간 경과 시 OOMKilled 발생
+
+## 실행 순서
+
+```bash
+BASE_URL="http://<web-host>:8080/api/shipping"
+
+# 1. 정상 상태 확인
+curl "$BASE_URL/scenario/memory-check"
+# → 200 OK, "Heap memory is healthy"
+
+# 2. 메모리 누수 유발
+curl "$BASE_URL/scenario/memory-leak?chunkMB=25&count=20"
+# → 500MB 할당, 힙 사용률 급증
+
+# 3. 장애 확인 (Instana 알림 트리거)
+curl "$BASE_URL/scenario/memory-check"
+# → 500 "Heap memory critical"
+
+# 4. Pod 상태 확인
+oc get pods -l service=shipping
+# → OOMKilled 또는 CrashLoopBackOff 상태
+
+# 5. 원인 분석
+oc describe pod <shipping-pod>
+# → Last State: Terminated, Reason: OOMKilled
+
+oc logs <shipping-pod> --previous
+# → "HEAP CRITICAL: usage=..." 로그 확인
+
+# 6. Resource limit 상향으로 복구
+oc set resources deployment/shipping --limits=memory=2Gi --requests=memory=1Gi
+# → Deployment 변경으로 새 Pod 자동 rollout
+
+# 7. Rollout 확인
+oc rollout status deployment/shipping
+# → 새 Pod 정상 기동
+
+# 8. 복구 확인
+oc get pods -l service=shipping              # → Running, RESTARTS 0 (새 Pod)
+curl "$BASE_URL/scenario/memory-check"       # → 200 OK
+```
+
+## 복구 원리
+
+1. `oc set resources`로 memory limit을 상향하면 Deployment spec이 변경됨
+2. K8s가 자동으로 새 Pod을 rollout (기존 Pod 종료 → 새 Pod 생성)
+3. 새 Pod은 깨끗한 JVM으로 시작 → 메모리 누수 없음 + 더 큰 limit 적용
+4. 근본 원인(코드의 메모리 누수)은 별도 코드 수정이 필요하지만, 운영 중 즉각 대응으로 서비스 복구
+
+---
+
+# flagd Feature Flag 연동 (자동 시나리오 유발)
+
+위 시나리오들을 curl 수동 호출 대신 **flagd Feature Flag**로 자동 유발할 수 있습니다.
+
+- Flag ON → 5초 내 자동으로 장애 유발 (1회)
+- Flag OFF → triggered 상태 리셋 (다시 ON하면 재실행 가능)
+- flagd 미연결 시 무시 (graceful degradation)
+
+## 아키텍처
+
+```
+flagd (port 8016, OFREP REST API)
+  ↑ flag config (ConfigMap / JSON file)
+
+shipping app
+  └─ ScenarioFlagWatcher (@Scheduled, 5초 간격)
+       ├─ POST /ofrep/v1/evaluate/flags/scenario-memory-leak
+       │    → true: memory leak 유발 (1회)
+       └─ POST /ofrep/v1/evaluate/flags/scenario-pool-exhaustion
+            → true: pool exhaustion 유발 (1회)
+```
+
+## Feature Flag 목록
+
+| Flag Key | 설명 |
+|----------|------|
+| `scenario-memory-leak` | ON → 메모리 누수 자동 유발 (25MB × 20 = 500MB) |
+| `scenario-pool-exhaustion` | ON → DB connection pool 고갈 자동 유발 |
+
+## K8s / OpenShift 환경 사용법
+
+flagd는 shipping Pod의 sidecar로 실행되며, ConfigMap에서 flag 설정을 읽습니다.
+
+### 시나리오 유발 (Memory Leak 예시)
+
+```bash
+# 1. ConfigMap 수정 — defaultVariant를 "true"로 변경
+oc edit configmap flagd-config
+# "scenario-memory-leak" 항목의 "defaultVariant": "false" → "true"
+
+# 또는 파일로 수정 후 적용
+oc apply -f flagd-configmap.yaml
+
+# 2. 5초 내 shipping이 flag 감지 → 자동 메모리 누수 유발
+# 로그 확인:
+oc logs -f <shipping-pod> -c shipping | grep FlagWatcher
+
+# 3. 장애 확인
+curl $BASE_URL/scenario/memory-check    # → 500 "Heap memory critical"
+
+# 4. Instana에서 알림 확인 후 원인 분석
+oc describe pod <shipping-pod>
+oc logs <shipping-pod> --previous
+```
+
+### 시나리오 중단 및 복구
+
+```bash
+# 1. Flag OFF — defaultVariant를 "false"로 변경
+oc edit configmap flagd-config
+# "defaultVariant": "true" → "false"
+
+# 2. 리소스 상향 (메모리 누수의 경우)
+oc set resources deployment/shipping --limits=memory=2Gi
+
+# 3. 새 Pod 기동 → flag OFF → 정상 동작
+oc rollout status deployment/shipping
+curl $BASE_URL/scenario/memory-check    # → 200 OK
+```
+
+## Docker Compose 환경 사용법
+
+```bash
+# 시나리오 유발: flagd-config.json에서 defaultVariant를 "true"로 변경
+# flagd가 파일 변경을 자동 감지합니다.
+vi flagd-config.json
+# "defaultVariant": "false" → "true"
+
+# 5초 후 자동 유발 확인
+curl http://localhost:8080/api/shipping/scenario/memory-check    # → 500
+
+# 복구: defaultVariant를 "false"로 되돌리기
+vi flagd-config.json
+# "defaultVariant": "true" → "false"
+```

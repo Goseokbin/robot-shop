@@ -18,6 +18,7 @@ import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -72,15 +73,9 @@ public class ScenarioController {
     }
 
     /**
-     * Pool의 모든 connection을 SLEEP 쿼리로 점유합니다.
-     * Pool이 가득 차면 이후 /count 등의 요청은 connection-timeout 에러가 발생합니다.
-     *
-     * @param sleepSeconds SLEEP 쿼리 유지 시간 (기본 300초)
+     * Pool exhaustion 로직을 실행합니다. ScenarioFlagWatcher에서도 호출 가능.
      */
-    @GetMapping("/pool-exhaustion")
-    public Map<String, Object> poolExhaustion(
-            @RequestParam(defaultValue = "300") int sleepSeconds) {
-
+    public Map<String, Object> triggerPoolExhaustion(int sleepSeconds) {
         HikariDataSource hikari = unwrapHikariDataSource();
         int poolSize = hikari.getMaximumPoolSize();
 
@@ -135,6 +130,18 @@ public class ScenarioController {
                 "Subsequent DB requests (e.g. /count) will timeout after " +
                 hikari.getConnectionTimeout() + "ms. Call /scenario/pool-resize?size=20 to expand pool.");
         return result;
+    }
+
+    /**
+     * Pool의 모든 connection을 SLEEP 쿼리로 점유합니다.
+     * Pool이 가득 차면 이후 /count 등의 요청은 connection-timeout 에러가 발생합니다.
+     *
+     * @param sleepSeconds SLEEP 쿼리 유지 시간 (기본 300초)
+     */
+    @GetMapping("/pool-exhaustion")
+    public Map<String, Object> poolExhaustion(
+            @RequestParam(defaultValue = "300") int sleepSeconds) {
+        return triggerPoolExhaustion(sleepSeconds);
     }
 
     /**
@@ -246,6 +253,93 @@ public class ScenarioController {
         }
         result.put("holdingThreads", holdingThreads.size());
         return result;
+    }
+
+    // ========== Memory Leak 시나리오 ==========
+
+    /**
+     * Memory leak 로직을 실행합니다. ScenarioFlagWatcher에서도 호출 가능.
+     */
+    public Map<String, Object> triggerMemoryLeak(int chunkMB, int count) {
+        Runtime rt = Runtime.getRuntime();
+
+        logger.warn("Starting memory-leak scenario: chunkMB={}, count={}, totalAlloc={}MB",
+                chunkMB, count, chunkMB * count);
+
+        for (int i = 0; i < count; i++) {
+            byte[] bytes = new byte[1024 * 1024 * chunkMB];
+            Arrays.fill(bytes, (byte) 1);
+            Controller.bytesGlobal.add(bytes);
+        }
+
+        long afterUsed = rt.totalMemory() - rt.freeMemory();
+        long maxMemory = rt.maxMemory();
+        double usagePercent = (double) afterUsed / maxMemory * 100;
+
+        logger.error("HEAP CRITICAL: usage={}/{}MB ({}%), leaked={}MB, chunks={}",
+                afterUsed / 1024 / 1024, maxMemory / 1024 / 1024, Math.round(usagePercent),
+                chunkMB * count, Controller.bytesGlobal.size());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("scenario", "memory-leak");
+        result.put("chunkMB", chunkMB);
+        result.put("count", count);
+        result.put("totalLeakedMB", chunkMB * count);
+        result.put("heapUsedMB", afterUsed / 1024 / 1024);
+        result.put("heapMaxMB", maxMemory / 1024 / 1024);
+        result.put("heapUsagePercent", Math.round(usagePercent * 10) / 10.0);
+        result.put("totalChunks", Controller.bytesGlobal.size());
+        result.put("message", "Allocated " + (chunkMB * count) + "MB into static list (GC-proof). " +
+                "Heap usage: " + Math.round(usagePercent) + "%. " +
+                "Pod will likely be OOMKilled soon. Use 'oc' commands to diagnose and recover.");
+        return result;
+    }
+
+    /**
+     * 메모리 누수를 유발합니다.
+     * chunkMB × count 만큼의 메모리를 static List에 할당하여 GC가 회수할 수 없게 합니다.
+     * OOMKilled → CrashLoopBackOff → oc set resources로 해결하는 시나리오용.
+     *
+     * @param chunkMB 청크 당 MB (기본 25)
+     * @param count   청크 개수 (기본 20)
+     */
+    @GetMapping("/memory-leak")
+    public Map<String, Object> memoryLeak(
+            @RequestParam(defaultValue = "25") int chunkMB,
+            @RequestParam(defaultValue = "20") int count) {
+        return triggerMemoryLeak(chunkMB, count);
+    }
+
+    /**
+     * 힙 메모리 사용률을 확인합니다.
+     * 사용률이 80%를 초과하면 500 에러를 반환하여 Instana에서 감지할 수 있게 합니다.
+     */
+    @GetMapping("/memory-check")
+    public ResponseEntity<Map<String, Object>> memoryCheck() {
+        Runtime rt = Runtime.getRuntime();
+        long used = rt.totalMemory() - rt.freeMemory();
+        long max = rt.maxMemory();
+        double usagePercent = (double) used / max * 100;
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("scenario", "memory-check");
+        result.put("heapUsedMB", used / 1024 / 1024);
+        result.put("heapMaxMB", max / 1024 / 1024);
+        result.put("heapUsagePercent", Math.round(usagePercent * 10) / 10.0);
+        result.put("leakedChunks", Controller.bytesGlobal.size());
+
+        if (usagePercent > 80) {
+            result.put("error", "Heap memory critical");
+            result.put("message", "Heap usage " + Math.round(usagePercent) + "% exceeds 80% threshold. " +
+                    "Memory leak detected. Pod restart required.");
+            logger.error("Heap memory critical: used={}/{}MB ({}%)",
+                    used / 1024 / 1024, max / 1024 / 1024, Math.round(usagePercent));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+        }
+
+        result.put("status", "OK");
+        result.put("message", "Heap memory is healthy.");
+        return ResponseEntity.ok(result);
     }
 
     /**

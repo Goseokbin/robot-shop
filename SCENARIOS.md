@@ -118,10 +118,10 @@ Payment 서비스(Python/Flask)에서 메모리 누수 → Pod OOMKilled → `oc
 
 ## Python / K8s 설정
 
-- **K8s memory limit**: `256Mi`
-- **MEMORY_LIMIT_MB** 환경변수: `256` (memory-check 임계값 계산용)
-- memory-leak 기본값: 25MB × 4 = 100MB 할당 → RSS가 limit의 80% 초과 → memory-check 500 에러
-- 추가 할당 시 OOMKilled 발생
+- **K8s memory limit**: `512Mi` (실제 OOM 기준)
+- **MEMORY_LIMIT_MB** 환경변수: `256` (memory-check CRITICAL 판단 기준, 80% = ~205MB)
+- memory-leak 기본값: 25MB × 4 = 100MB → HEALTHY 유지
+- `chunkMB=25&count=8` (200MB) 할당 → RSS ~250MB → CRITICAL (97%) but OOM은 512Mi라 안전
 
 ## 실행 순서
 
@@ -133,8 +133,8 @@ curl "$BASE_URL/scenario/memory-check"
 # → 200 OK, {"status": "HEALTHY", "rssMB": ..., "usagePercent": ...}
 
 # 2. 메모리 누수 유발
-curl "$BASE_URL/scenario/memory-leak?chunkMB=25&count=4"
-# → 100MB 할당, RSS 급증
+curl "$BASE_URL/scenario/memory-leak?chunkMB=25&count=8"
+# → 200MB 할당, RSS ~250MB (CRITICAL이지만 OOM은 아님)
 
 # 3. 장애 확인 (Instana 알림 트리거)
 curl "$BASE_URL/scenario/memory-check"
@@ -152,7 +152,7 @@ oc logs <payment-pod> --previous
 # → "MEMORY CRITICAL: RSS=..." 로그 확인
 
 # 6. Resource limit 상향으로 복구
-oc set resources deployment/payment --limits=memory=512Mi --requests=memory=256Mi
+oc set resources deployment/payment --limits=memory=1Gi --requests=memory=512Mi
 # → Deployment 변경으로 새 Pod 자동 rollout
 
 # 7. Rollout 확인
@@ -306,7 +306,7 @@ oc edit configmap flagd-config
 # "defaultVariant": "true" → "false"
 
 # 2. 리소스 상향 (메모리 누수의 경우)
-oc set resources deployment/payment --limits=memory=512Mi
+oc set resources deployment/payment --limits=memory=1Gi
 
 # 3. 새 Pod 기동 → flag OFF → 정상 동작
 oc rollout status deployment/payment

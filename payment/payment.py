@@ -138,10 +138,8 @@ def memory_check():
         'leakedChunks': len(_leaked_bytes),
     }
     if usage_pct > 80:
-        app.logger.error('MEMORY CRITICAL: RSS={:.0f}MB, limit={}MB, usage={:.1f}%'.format(
+        raise Exception('MEMORY CRITICAL: RSS={:.0f}MB, limit={}MB, usage={:.1f}%'.format(
             rss_mb, MEMORY_LIMIT_MB, usage_pct))
-        result['status'] = 'CRITICAL'
-        return jsonify(result), 500
     result['status'] = 'HEALTHY'
     return jsonify(result)
 

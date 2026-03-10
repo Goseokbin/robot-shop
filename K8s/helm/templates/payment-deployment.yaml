@@ -25,10 +25,6 @@ spec:
         #image: {{ .Values.image.repo }}/rs-payment:{{ .Values.image.version }}
         image: docker.io/seokbin9023/my-repository:payment
         imagePullPolicy: Always
-        # pyrasite-dump용: gdb가 프로세스에 attach하려면 SYS_PTRACE 필요
-        securityContext:
-          capabilities:
-            add: ["SYS_PTRACE"]
         # agent networking access
         env:
           - name: INSTANA_AGENT_HOST

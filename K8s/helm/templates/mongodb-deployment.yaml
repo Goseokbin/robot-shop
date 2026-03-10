@@ -23,6 +23,9 @@ spec:
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
         - containerPort: 27017
+        volumeMounts:
+        - name: mongo-data
+          mountPath: /data/db
         resources:
           limits:
             cpu: 200m
@@ -30,6 +33,9 @@ spec:
           requests:
             cpu: 100m
             memory: 100Mi
+      volumes:
+      - name: mongo-data
+        emptyDir: {}
       restartPolicy: Always
       {{- with .Values.mongodb.affinity }}
       affinity:

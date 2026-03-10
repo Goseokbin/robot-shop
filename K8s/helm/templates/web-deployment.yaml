@@ -17,6 +17,8 @@ spec:
       {{ if .Values.psp.enabled }}
       serviceAccountName: robot-shop
       {{ end }}
+      securityContext:
+        runAsUser: 0
       containers:
       - name: web
         image: {{ .Values.image.repo }}/rs-web:{{ .Values.image.version }}
